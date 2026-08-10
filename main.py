@@ -16,6 +16,12 @@ from prompt_template import role_prompt_dict
 st.set_page_config(
     page_title="💢❤️💢情绪修复助手"
 )
+#防止用户每次刷新页面都会把聊天记录清空
+#改动1:session_state初始化:
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history=[] #初始化用户看的聊天历史为空列表
+if "memory_manager" not in st.session_state:
+    st.session_state.memory_manager=None #给AI用的内存管理器初始化为None
 #侧边栏设计:
 with st.sidebar:
     st.header("🗝️API配置")
@@ -53,6 +59,12 @@ with st.sidebar:
         st.warning("请先输入API密钥,再上传txt文件")
     st.info("💡使用提示:\n1.先填写API密钥\n2.再上传情感知识库txt文件,文件内容为情感文本\n3.支持文字+图片格式")
 
+#初始化记忆管理器:
+if api_key.strip() and st.session_state.memory_manager is None:#如果用户输入了API密钥,且内存管理器为空,则初始化内存管理器
+    llm_text=create_llm(api_key) #创建一个LLM_Text模型,纯文本模型
+    emb=create_embedding(api_key) #创建一个embedding模型
+    st.session_state.memory_manager=MemoryManager(llm_text,emb) #创建一个内存管理器
+# 为什么用 create_text_llm 而不是 create_llm？因为记忆管理器只做摘要压缩，不需要看图片。用 qwen-plus（纯文本模型）比 qwen-vl-max 便宜约 50%，摘要质量没有区别。摘要质量没有区别
 #主页面设计:
 st.header("💢❤️💢情绪修复助手(LangChain+RAG模块化项目)")
 #st.markdown 用于渲染Markdown格式的文本,用于添加段落、标题、列表等元素
@@ -97,6 +109,10 @@ if send_btn:
         # 文本空白，直接跳过向量检索，context置空，不会调用embedding接口
         context_text=""
 
+    #改动3:检索长期记忆:
+    long_term_context=memory_mgr.retrieve_relevant_memory( #.retrieve_relevant_memory方法用于检索与用户输入相关的记忆,返回值是一个列表,每个元素是一个字典,包含记忆的文本内容和相关度
+        user_text if user_text.strip() else "图片对话"
+    )
     #3.填充角色提示词
     raw_sys_prompt=role_prompt_dict[role_select]
     sys_prompt=raw_sys_prompt.format(context=context_text)
