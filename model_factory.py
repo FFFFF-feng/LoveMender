@@ -1,16 +1,29 @@
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from config import (
     model_name,
+    TEXT_MODEL_NAME,  # 【新增】纯文本模型名称
     embedding_model_name,
     DASHSCOPE_BASE_URL,
     request_timeout,
     temperature
 )
 
-# 对话大模型
+# 对话大模型（多模态，有图片时用）
 def create_llm(api_key: str):
     llm = ChatOpenAI(
         model=model_name,
+        api_key=api_key,
+        base_url=DASHSCOPE_BASE_URL,
+        timeout=request_timeout,
+        temperature=temperature
+    )
+    return llm
+
+# 【新增】纯文本大模型（无图片时用，省 token）
+# 记忆管理器的摘要压缩也用这个模型，比 qwen-vl-max 便宜约 50%
+def create_text_llm(api_key: str):
+    llm = ChatOpenAI(
+        model=TEXT_MODEL_NAME,
         api_key=api_key,
         base_url=DASHSCOPE_BASE_URL,
         timeout=request_timeout,

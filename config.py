@@ -25,7 +25,8 @@ DASHSCOPE_BASE_URL =os.environ.get(
 )
 # 模型名称
 model_name=os.environ.get("MODEL_NAME", "qwen-vl-max")
-embedding_model_name = os.environ.get("EMBEDDING_MODEL_NAME", "text-embedding-v1") # 文本转向量模型（修正拼写texr → text）
+TEXT_MODEL_NAME = os.environ.get("TEXT_MODEL_NAME", "qwen-plus")  # 【新增】纯文本模型（无图片时用，省token）
+embedding_model_name = os.environ.get("EMBEDDING_MODEL_NAME", "text-embedding-v1") # 文本转向量模型
 
 # 请求超时时间设置
 # 底层http库部分场景要求浮点类型，使用60.0避免潜在类型报错
