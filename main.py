@@ -149,7 +149,7 @@ with st.sidebar:
             txt_content = uploader_txt.read().decode("utf-8")
             emb = create_embedding(api_key)
             vec_store = init_vector_store(emb)
-            chunk_count = ingest_txt_vector_store(txt_content, "情感知识库", vec_store)
+            chunk_count = ingest_txt_vector_store(txt_content, uploader_txt.name, vec_store)
             st.session_state.uploaded_txt_name = uploader_txt.name
             st.success(f"成功导入{chunk_count}条文本片段存入向量数据库")
         else:
@@ -159,18 +159,38 @@ with st.sidebar:
 
     st.divider()
 
-    # 清空对话按钮
-    if st.session_state.memory_manager and st.button("🗑️ 清空对话记忆"):
-        st.session_state.memory_manager.short_term_memory = []
-        st.session_state.chat_history = []
-        st.rerun()
+    # ===== 会话状态监控 + 新建会话 =====
+    if st.session_state.memory_manager:
+        stats = st.session_state.memory_manager.get_session_stats()
+        turns = stats["turns"]
+        max_turns = stats["max_turns"]
+
+        st.subheader("📊 会话状态")
+        st.progress(
+            min(turns / max_turns, 1.0),
+            text=f"对话轮次: {turns} / {max_turns}",
+        )
+
+        # 根据使用比例显示不同级别的提醒
+        if turns >= max_turns:
+            st.error("⚠️ 当前会话已达上限，建议新建会话！")
+        elif turns >= max_turns * 0.8:
+            st.warning("💡 会话即将达到上限，可考虑新建会话")
+
+        # 新建会话按钮（清空短期记忆 + UI 历史，保留长期记忆）
+        if st.button("🔄 新建会话", use_container_width=True):
+            st.session_state.memory_manager.reset_session()
+            st.session_state.chat_history = []
+            st.rerun()
 
     st.info(
         "💡 使用提示:\n"
         "1.先填写API密钥\n"
         "2.上传情感知识库(可选)\n"
         "3.对话自动保留多轮记忆\n"
-        "4.纯文本自动用qwen-plus省token"
+        "4.纯文本自动用qwen-plus省token\n"
+        "5.会话达上限时点击「新建会话」\n"
+        "  长期记忆会保留，不影响跨会话回忆"
     )
 
 # ========== 初始化记忆管理器 ==========

@@ -37,3 +37,13 @@ temperature = float(os.environ.get("TEMPERATURE", 0.7))
 # 取值区间0~1
 # 越接近0：输出稳定、逻辑严谨，随机性低
 # 越接近1：回答发散、创意更强，但更容易产生幻觉
+
+#RAG去重+重排参数:
+#1.重排前扩大检索的数量,选取top前20个片段进行重排
+# 重排的意义是根据片段的相似度和相关性，对检索到的片段进行排序，使更相关的片段排在前面，更不相关的片段排在后面
+# 因为粗排会出现几个词重复但内容不符合的情况,更多的是距离,没考虑相关性逻辑被筛选出来
+RERANK_TOP_K=int(os.environ.get("RERANK_TOP_K", 20))
+#2.重排阈值,把相关性低于0.5的片段筛选出来,只保留相关性高于阈值的片段
+SIMILARITY_THRESHOLD=float(os.environ.get("SIMILARITY_THRESHOLD", 0.5))
+#3.语义去重阈值,把相似度高于阈值的片段筛选出来,只保留相似度低于阈值的片段
+DEDUP_SIMILARITY_THRESHOLD=float(os.environ.get("DEDUP_SIMILARITY_THRESHOLD", 0.95))
