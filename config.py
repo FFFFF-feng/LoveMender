@@ -1,6 +1,8 @@
 # 全局配置常量
 # 从.env文件中读取配置
 import os
+
+from dateutil.relativedelta import SU
 # dotenv模块用于加载环境变量，.env文件中的变量会被加载到os.environ字典中
 from dotenv import load_dotenv
 # 从.env文件中加载环境变量
@@ -16,6 +18,12 @@ chunk_overlap =int(os.environ.get("CHUNK_OVERLAP", 80))  # 文本切片的重叠
 
 # 向量检索返回topK片段数量
 retrieve_top_k = int(os.environ.get("RETRIEVE_TOP_K", 10))
+
+# ========== 三级模型路由 ==========
+# qwen-vl-max: 多模态(图片) → 最贵但最强
+# qwen-plus:  纯文本对话    → 中等性价比
+# qwen-turbo: 摘要/简单任务  → 最便宜，摘要够用
+SUMMARY_MODEL_NAME=os.environ.get("SUMMARY_MODEL_NAME", "qwen-turbo")#摘要压缩用的轻量模型
 
 # 通义千问兼容OpenAI的接口地址
 # LangChain默认会访问OpenAI官方地址，需要手动指定base_url转发到阿里云通义千问网关
@@ -47,3 +55,7 @@ RERANK_TOP_K=int(os.environ.get("RERANK_TOP_K", 20))
 SIMILARITY_THRESHOLD=float(os.environ.get("SIMILARITY_THRESHOLD", 0.5))
 #3.语义去重阈值,把相似度高于阈值的片段筛选出来,只保留相似度低于阈值的片段
 DEDUP_SIMILARITY_THRESHOLD=float(os.environ.get("DEDUP_SIMILARITY_THRESHOLD", 0.95))
+
+# ========== Token 压缩参数 ==========
+MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS", 2000))  # RAG上下文最大字符数，超长截断
+MAX_REPLY_TOKENS = int(os.environ.get("MAX_REPLY_TOKENS", 1024))  # LLM回复最大token数，防止废话

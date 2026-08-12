@@ -2,10 +2,12 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from config import (
     model_name,
     TEXT_MODEL_NAME,  # 【新增】纯文本模型名称
+    SUMMARY_MODEL_NAME,  # 【新增】摘要压缩模型名称
     embedding_model_name,
     DASHSCOPE_BASE_URL,
     request_timeout,
-    temperature
+    temperature,
+    MAX_REPLY_TOKENS,#最大回复token数
 )
 
 # 对话大模型（多模态，有图片时用）
@@ -15,7 +17,8 @@ def create_llm(api_key: str):
         api_key=api_key,
         base_url=DASHSCOPE_BASE_URL,
         timeout=request_timeout,
-        temperature=temperature
+        temperature=temperature,
+        max_tokens=MAX_REPLY_TOKENS,#限制回复长度,防止废话浪费
     )
     return llm
 
@@ -27,7 +30,21 @@ def create_text_llm(api_key: str):
         api_key=api_key,
         base_url=DASHSCOPE_BASE_URL,
         timeout=request_timeout,
-        temperature=temperature
+        temperature=temperature,
+        max_tokens=MAX_REPLY_TOKENS,#限制回复长度,防止废话浪费
+    )
+    return llm
+
+# 【新增】摘要压缩专用模型(qwen-turbo,最便宜)
+#用于记忆管理功能的对话摘要
+def create_summary_llm(api_key: str):
+    llm = ChatOpenAI(
+        model=SUMMARY_MODEL_NAME,
+        api_key=api_key,
+        base_url=DASHSCOPE_BASE_URL,
+        timeout=request_timeout,
+        temperature=0.3, #摘要压缩需要精准度，避免生成不相关的内容,所有降低温度值
+        max_tokens=300, #摘要不能过长,防止浪费
     )
     return llm
 
