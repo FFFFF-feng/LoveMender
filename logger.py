@@ -21,7 +21,7 @@ def setup_logger():
     logger.setLevel(logging.DEBUG)#设置日志级别为DEBUG,记录所有日志
 
     #避免重复添加handler(streamlit重跑的时候会重新import)
-    if not logger.handlers:
+    if logger.handlers:
         return logger
 
     #控制台输出级别handler:INFO级别,简洁格式
@@ -52,3 +52,4 @@ def setup_logger():
 
 #全局日志记录器,所有模块通过From logger import logger 来使用
 logger = setup_logger()
+

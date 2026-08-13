@@ -1,8 +1,6 @@
 # 全局配置常量
 # 从.env文件中读取配置
 import os
-
-from dateutil.relativedelta import SU
 # dotenv模块用于加载环境变量，.env文件中的变量会被加载到os.environ字典中
 from dotenv import load_dotenv
 # 从.env文件中加载环境变量
@@ -51,11 +49,14 @@ temperature = float(os.environ.get("TEMPERATURE", 0.7))
 # 重排的意义是根据片段的相似度和相关性，对检索到的片段进行排序，使更相关的片段排在前面，更不相关的片段排在后面
 # 因为粗排会出现几个词重复但内容不符合的情况,更多的是距离,没考虑相关性逻辑被筛选出来
 RERANK_TOP_K=int(os.environ.get("RERANK_TOP_K", 20))
-#2.重排阈值,把相关性低于0.5的片段筛选出来,只保留相关性高于阈值的片段
-SIMILARITY_THRESHOLD=float(os.environ.get("SIMILARITY_THRESHOLD", 0.5))
+#2.重排阈值,把相关性低于0.3的片段筛选出来,只保留相关性高于阈值的片段
+SIMILARITY_THRESHOLD=float(os.environ.get("SIMILARITY_THRESHOLD", 0.3))
 #3.语义去重阈值,把相似度高于阈值的片段筛选出来,只保留相似度低于阈值的片段
 DEDUP_SIMILARITY_THRESHOLD=float(os.environ.get("DEDUP_SIMILARITY_THRESHOLD", 0.95))
 
 # ========== Token 压缩参数 ==========
 MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS", 2000))  # RAG上下文最大字符数，超长截断
 MAX_REPLY_TOKENS = int(os.environ.get("MAX_REPLY_TOKENS", 1024))  # LLM回复最大token数，防止废话
+
+# ========== Agent 配置 ==========
+AGENT_MAX_ITERATIONS = int(os.environ.get("AGENT_MAX_ITERATIONS", 3))  # Agent最大推理循环次数

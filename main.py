@@ -12,8 +12,19 @@ from model_factory import create_llm, create_text_llm, create_embedding
 from rag_service import init_vector_store, ingest_txt_vector_store, search_vector_store, get_context_from_docs
 from prompt_template import role_prompt_dict
 from memory_manager import MemoryManager
+from logger import logger
+from agent_tools import (
+    analyze_emotion,
+    get_repair_suggestion,
+    get_current_time,
+    create_agent_executor,
+    create_knowledge_search_tool,
+    TOOL_INSTRUCTIONS,
+)
+# 从配置文件中获取最大迭代次数
+from config import AGENT_MAX_ITERATIONS
 
-# ========== 页面配置 ==========
+## ========== 页面配置 ==========
 st.set_page_config(
     page_title="情绪修复助手",
     page_icon="💔❤️",
@@ -204,7 +215,7 @@ if api_key.strip() and st.session_state.memory_manager is None:
 
 # ========== 主界面 ==========
 st.markdown('<div class="main-title">💢❤️💢 情绪修复助手</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">LangChain + RAG + 记忆机制 · 多轮对话 · 知识检索 · 多模态</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Agent + RAG + 记忆机制 · 工具调用 · 多轮对话 · 知识检索 · 多模态</div>', unsafe_allow_html=True)
 
 # 两栏布局：左 3 份输入区，右 2 份角色选择 + 按钮
 col_left, col_right = st.columns([3, 2])
@@ -256,40 +267,45 @@ if send_btn:
         "content": user_text if user_text.strip() else "(图片消息)",
         "image": upload_img.getvalue() if upload_img else None,
     })
-
-    # --- 初始化模型与向量库 ---
-    llm = create_llm(api_key)
-    emb = create_embedding(api_key)
-    vec_store = init_vector_store(emb)
-
-    # --- RAG 检索（只有文本非空才执行）---
-    if user_text.strip():
-        search_docs = search_vector_store(vec_store, user_text)
-        context_text = get_context_from_docs(search_docs)
-    else:
-        context_text = ""
-
-    # --- 检索长期记忆 ---
-    long_term_context = memory_mgr.retrieve_relevant_memory(
-        user_text if user_text.strip() else "图片对话"
-    )
-
-    # --- 组装系统提示词 ---
-    full_context = ""
-    if context_text:
-        full_context += f"【知识库参考】\n{context_text}\n\n"
-    if long_term_context:
-        full_context += f"【历史对话摘要】\n{long_term_context}\n\n"
-
-    raw_sys_prompt = role_prompt_dict[role_select]
-    sys_prompt = raw_sys_prompt.format(context=full_context)
-
-    # --- 构建消息列表 ---
-    messages = memory_mgr.build_messages(sys_prompt, user_text)
-
-    # --- 处理图片（多模态）---
+    #初始化向量库:
+    emb=create_embedding(api_key)
+    vec_store=init_vector_store(emb)
+    # ========== 两条路径：图片走大模型，纯文本走Agent ==========
     temp_path = None
+    ai_reply = None
+
     if upload_img:
+        # ===== 图片路径：qwen-vl-max 多模态直接调用 =====
+        llm = create_llm(api_key)
+
+        # RAG 预检索
+        if user_text.strip():
+            search_docs = search_vector_store(vec_store, user_text)
+            context_text = get_context_from_docs(search_docs)
+        else:
+            context_text = ""
+
+        # 检索长期记忆
+        long_term_context = memory_mgr.retrieve_relevant_memory(
+            user_text if user_text.strip() else "图片对话"
+        )
+
+        # 组装系统提示词
+        full_context = ""
+        if context_text:
+            full_context += f"【知识库参考】\n{context_text}\n\n"
+        if long_term_context:
+            full_context += f"【历史对话摘要】\n{long_term_context}\n\n"
+        raw_sys_prompt = role_prompt_dict[role_select]
+        sys_prompt = raw_sys_prompt.format(context=full_context)
+
+        est_token = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
+        logger.info(f"[Token估算] 模型={llm.model_name}, 预估token数={est_token}")
+
+        # 构建消息列表
+        messages = memory_mgr.build_messages(sys_prompt, user_text)
+
+        # 处理图片
         file_ext = os.path.splitext(upload_img.name)[1] or ".jpg"
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
         temp_file.write(upload_img.read())
@@ -304,34 +320,77 @@ if send_btn:
             {"type": "text", "text": user_text},
             {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_img}"}},
         ]
-        # 用带图片的消息替换最后一条纯文本 HumanMessage
         messages[-1] = HumanMessage(content=human_content)
 
-    # --- 调用模型生成回复 ---
-    try:
-        with st.spinner("AI正在思考中..."):
-            response = llm.invoke(messages)
-            ai_reply = response.content
+        # 调用模型
+        try:
+            with st.spinner("AI正在思考中..."):
+                response = llm.invoke(messages)
+                ai_reply = response.content
+        except Exception as e:
+            logger.error(f"图片对话请求异常：{e}")
+            st.error(f"请求异常：{e}")
 
-            # 展示 AI 回复（聊天气泡）
-            with st.chat_message("assistant"):
-                st.markdown(ai_reply)
+    else:
+        # ===== 纯文本路径：qwen-plus + Agent 工具调用 =====
+        llm = create_text_llm(api_key)
 
-            # 存入 UI 历史
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": ai_reply,
-                "image": None,
-            })
+        # 检索长期记忆
+        long_term_context = memory_mgr.retrieve_relevant_memory(user_text)
 
-            # 存入记忆管理器（超限自动触发摘要压缩）
-            memory_mgr.add_exchange(
-                user_text if user_text.strip() else "(图片消息)",
-                ai_reply,
-            )
+        # 组装系统提示词
+        full_context = long_term_context if long_term_context else "(暂无历史对话)"
+        raw_sys_prompt = role_prompt_dict[role_select]
+        sys_prompt = raw_sys_prompt.format(context=full_context)
+        sys_prompt += "\n\n" + TOOL_INSTRUCTIONS
 
-    except Exception as e:
-        st.error(f"请求异常：{e}")
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+        # 构建工具列表
+        tools = [
+            analyze_emotion,
+            get_repair_suggestion,
+            get_current_time,
+            create_knowledge_search_tool(vec_store),
+        ]
+
+        # 获取聊天历史
+        chat_history = memory_mgr.get_chat_history_messages()
+
+        est_token = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
+        logger.info(f"[Token估算] 模型={llm.model_name}, 预估token数={est_token}")
+
+        # 创建并执行 Agent
+        try:
+            with st.spinner("Agent正在分析并调用工具..."):
+                agent_message = chat_history + [HumanMessage(content=user_text)]
+                executor = create_agent_executor(llm, tools, sys_prompt, max_iterations=AGENT_MAX_ITERATIONS)
+                result = executor.invoke({"messages": agent_message})
+                ai_reply = result["messages"][-1].content
+                logger.info(f"[Agent回复] 执行完毕,回复长度={len(ai_reply)}")
+        except Exception as e:
+            logger.error(f"[Agent] 执行失败,回退到直接调用大模型：{e}")
+            try:
+                messages = memory_mgr.build_messages(sys_prompt, user_text)
+                response = llm.invoke(messages)
+                ai_reply = response.content
+                logger.info(f"[Agent降级] 直接调用大模型成功")
+            except Exception as e2:
+                logger.error(f"[Agent降级] 直接调用大模型失败：{e2}")
+                st.error(f"请求异常：{e2}")
+
+    # ========== 公共：展示回复 + 存入记忆 + 清理 ==========
+    if ai_reply:
+        with st.chat_message("assistant"):
+            st.markdown(ai_reply)
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": ai_reply,
+            "image": None,
+        })
+        memory_mgr.add_exchange(
+            user_text if user_text.strip() else "图片对话",
+            ai_reply,
+        )
+
+    # 清理临时图片文件
+    if temp_path and os.path.exists(temp_path):
+        os.unlink(temp_path)

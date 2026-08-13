@@ -1,20 +1,21 @@
-# RAG服务
-# 向量库,文档入库,检索服务
-# 用于文档去重,重排
-import hashlib
-from pathlib import Path  # 用于路径操作
-from langchain_community.vectorstores import Chroma  # 用于向量数据库
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # 用于文本分割
-from langchain_core.documents import Document  # 用于文档操作
+# RAG服务（增强版）
+# 向量库,文档入库(含去重),检索服务(含相关度过滤+重排)
+import hashlib  # 用于计算MD5哈希值
+from pathlib import Path  #用于路径操作
+from langchain_community.vectorstores import Chroma  #用于向量数据库
+from langchain_text_splitters import RecursiveCharacterTextSplitter  #用于文本分割
+from langchain_core.documents import Document  #用于文档操作
+from logger import logger  #用于日志记录
+
 from config import (
     CHROMA_DB_DIR,
     chunk_size,
     chunk_overlap,
     retrieve_top_k,
-    # RAG去重+重排参数:
-    SIMILARITY_THRESHOLD,
-    DEDUP_SIMILARITY_THRESHOLD,
-    RERANK_TOP_K,
+    RERANK_TOP_K,                # 重排前扩大检索的候选数量
+    SIMILARITY_THRESHOLD,        # 相关度过滤阈值
+    DEDUP_SIMILARITY_THRESHOLD,  # 语义去重阈值
+    MAX_CONTEXT_CHARS,           # 【新增】RAG上下文最大字符数
 )
 
 
@@ -22,184 +23,210 @@ def init_vector_store(embeddings):
     """
     初始化向量库
     如果目录不存在,则创建,已存在则自动加载持久化数据
+    【关键修复】使用 cosine 距离度量，避免向量未归一化时 L2 距离失效
     :return:
     """
     Path(CHROMA_DB_DIR).mkdir(parents=True, exist_ok=True)
     vector_store = Chroma(
         persist_directory=CHROMA_DB_DIR,
-        embedding_function=embeddings,  # 向量嵌入函数,用于将文本转换为向量表示
+        embedding_function=embeddings,
+        collection_metadata={"hnsw:space": "cosine"},  # cosine距离，不受向量归一化影响
     )
     return vector_store
 
 
-# TODO: 1.MD5精确去重(入库时)--------------------------------------
+# ==================== 第一层：MD5 精确去重 ====================
 
-def _compute_md5(text: str):
-    """
-    计算文本的MD5值,一个32位的字符串,用于唯一标识文本
-    """
+def _compute_md5(text: str) -> str:
+    """计算文本的MD5哈希值，用于精确去重"""
     return hashlib.md5(text.encode("utf-8")).hexdigest()
-    # hexdigest()方法将字节对象转换为16进制字符串
 
 
 def _is_md5_duplicate(vector_store, chunk_hash: str) -> bool:
     """
-    检查改MD5值是否已存在向量数据库中
-    利用向量数据库的metadata字段,检查是否存在相同的MD5值的文档
-    :param vector_store: Chroma向量数据库,创建的一个实例
-    :param chunk_hash: 文档的MD5值
-    :return: 是否存在
-    """
-    # TODO: where查询返回结果格式:
-    """{
-        "ids": ["uuid-1", "uuid-2"],      # 找到了几个文档，就有几个ID
-        "embeddings": None,                # 这里不需要返回向量，所以通常是None
-        "metadatas": [{"source": "a.txt"}],# 对应的元数据
-        "documents": ["文本内容..."]       # 对应的文本内容
-        }
+    检查该MD5是否已存在于向量库中
+    通过Chroma底层collection的where元数据过滤查询
+    :return: True表示已存在（重复）
     """
     try:
-        # Chroma允许通过metadata字段进行查询
-        # 查询中'md5_hash'等于当前的hash的文档
-        # 如果存在,则返回True,否则返回False
-        existing = vector_store.get(where={"md5_hash": chunk_hash})
-        if existing and existing.get("ids"):
-            # 如果当前文档在hash列表中存在了对应的ID,则说明已存在,即重复文档
-            return True
-    except Exception as e:
-        print(f"md5查询向量数据库出错:{e}")
-        return False
-    return False  # 【补充】如果没报错也没找到，应该返回False
-
-
-# TODO: 2.语义近似去重(入库时)--------------------------------------------------
-def _is_semantic_duplicate(vector_store, text: str, threshold=float, source_name: str = None) -> bool:
-    """
-    检查文本是否与已有的内容语义上高度重复
-    原理:拿当前文本去库里面搜索出最相似的一条内容,如果相似度极高,达到预设的阈值,则说明已存在,即重复文档
-    【关键修复】只在同一 source 内查重，不同文件允许内容相似，避免文件B被文件A的内容"误杀"导致返回0
-    """
-    try:
-        # 搜索最相似的一条:
-        # 【关键修复】只在同一来源内搜索，避免跨文件误杀
-        if source_name:
-            result = vector_store.similarity_search_with_score(text, k=1, filter={"source": source_name})
-        else:
-            result = vector_store.similarity_search_with_score(text, k=1)
-
-        if result:
-            # 返回结果是列表的列表results = [
-            # (Document对象_1, 0.35),   # 第1个结果：(文档内容, 距离分数)
-            # (Document对象_2, 0.42),   # 第2个结果
-            #         ]
-            doc, score = result[0]
-
-            # 【关键修复】ChromaDB默认返回平方L2距离（不是L2距离）
-            # 对归一化向量：平方L2 = 2 - 2 * 余弦相似度
-            # 所以：余弦相似度 = 1 - score / 2
-            cosine_sim = max(0.0, 1 - score / 2)
-
-            # 如果相似度高于阈值,则说明已存在,即重复文档
-            if cosine_sim > threshold:
-                print(
-                    f"  [语义去重] 余弦相似度={cosine_sim:.4f} > {threshold}, 来源={source_name}, 跳过: {text[:40]}...")
+        # vector_store._collection 是 Chroma 底层的 chromadb collection 对象
+        # where 参数支持按 metadata 字段过滤
+        if hasattr(vector_store, "_collection"):
+            existing = vector_store._collection.get(where={"md5_hash": chunk_hash})
+            if existing and existing.get("ids"):
                 return True
     except Exception:
-        pass
+        pass  # 查重失败不阻塞入库流程，降级为不去重
     return False
 
 
-# 文档入库函数,输入原始文本,文档来源,向量库
+# ==================== 第二层：语义近似去重（仅同一来源内）====================
+
+def _is_semantic_duplicate(vector_store, text: str, threshold: float, source_name: str = None) -> bool:
+    """
+    检查文本是否与【同一来源】的已有内容语义重复
+    用相似度搜索找最接近的已有文档，如果余弦相似度超过阈值则判定重复
+
+    【关键修复】只在同一 source 内查重，不同文件允许内容相似
+    避免文件B被文件A的内容"误杀"导致返回0
+
+    :param threshold: 余弦相似度阈值（0~1），超过则判定为重复
+    :param source_name: 来源文件名，用于限定查重范围
+    :return: True表示语义重复
+    """
+    try:
+        # 只在同一来源内搜索，避免跨文件误杀
+        if source_name:
+            results = vector_store.similarity_search_with_score(
+                text, k=1, filter={"source": source_name}
+            )
+        else:
+            results = vector_store.similarity_search_with_score(text, k=1)
+
+        if results:
+            doc, score = results[0]
+            # 【关键修复】ChromaDB 使用 cosine 距离度量
+            # cosine_distance = 1 - cosine_similarity
+            # 所以：cosine_similarity = 1 - score
+            cosine_sim = max(0.0, 1 - score)
+            if cosine_sim > threshold:
+                print(f"  [语义去重] 余弦相似度={cosine_sim:.4f} > {threshold}, "
+                      f"来源={source_name}, 跳过: {text[:40]}...")
+                return True
+    except Exception:
+        pass  # 向量库为空时首次查询会失败，忽略即可
+    return False
+
+
+# ==================== 文档入库（含两层去重）====================
+
 def ingest_txt_vector_store(raw_text: str, source_name: str, vector_store):
     """
-    包含双重去重:MD5精确去重+语义近似去重
-    文档入库完整的一个流程:文本分割->封装成Document->向量嵌入->向量数据库存储->持久化
+    文档入库（增强版）：文本分割 → MD5去重 → 语义去重 → 向量存储
+
+    与原版区别：
+    - 每个 chunk 计算 MD5 存入 metadata，入库前查重
+    - 语义相似度查重，过滤"措辞不同但内容相同"的重复
+    - 返回实际入库数量（去重后的）
+
     :param raw_text: txt全文本
     :param source_name: 文档名称(元数据溯源)
-    :param vector_store: Chroma向量数据库,创建的一个实例
-    :return: 切片总数量
+    :param vector_store: Chroma向量数据库实例
+    :return: 实际入库的切片数量
     """
-    # 递归文本分割器
-    # 下面是初始化文本分割器,设置每个切片的最大字符数和切片之间的重叠字符数
+    # 1. 递归文本分割
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,  # 每个切片的最大字符数
-        chunk_overlap=chunk_overlap,  # 切片之间的重叠字符数
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
     )
-    # 将文本分割成多个切片
-    # ==========【修复】split() 方法不存在，正确方法是 split_text() ==========
-    text_chunks = text_splitter.split_text(raw_text)  # 分割成字符串列表[切片1,切片2,切片3,...]
-    # 入库前去重:
-    valid_docs = []  # 有效切片列表
-    md5_count = 0  # 记录MD5去重的重复切片数量
-    semantic_count = 0  # 记录语义去重的重复切片数量
+    text_chunks = text_splitter.split_text(raw_text)
+
+    # 2. 逐条去重
+    doc_list = []
+    md5_dedup_count = 0      # MD5去重命中次数
+    semantic_dedup_count = 0  # 语义去重命中次数
 
     for chunk in text_chunks:
-        # 1.MD5去重
-        chunk_hash = _compute_md5(chunk)  # 【修复】修正拼写 conpute -> compute
+        # 2.1 第一层：MD5精确去重（成本最低，先做）
+        chunk_hash = _compute_md5(chunk)
         if _is_md5_duplicate(vector_store, chunk_hash):
-            md5_count += 1  # 记录重复切片数量
-            continue
-        # 2.语义去重
-        # 【关键修复】这里必须传入 chunk (原始文本)，而不是 chunk_hash (MD5值)
-        # 同时传入配置中的阈值 DEDUP_SIMILARITY_THRESHOLD 和当前来源 source_name
-        if _is_semantic_duplicate(vector_store, chunk, DEDUP_SIMILARITY_THRESHOLD, source_name):
-            semantic_count += 1  # 记录重复切片数量
-            continue  # 【关键修复】命中语义去重后，必须跳过当前循环，不能加入valid_docs
+            md5_dedup_count += 1
+            continue  # 跳过，不入库
 
-        # 通过双重检查,确保当前切片不是重复的后,构建成Document对象,并写入md5_hash元数据
+        # 2.2 第二层：语义近似去重（仅在同一来源内查重，避免跨文件误杀）
+        if _is_semantic_duplicate(vector_store, chunk, DEDUP_SIMILARITY_THRESHOLD, source_name):
+            semantic_dedup_count += 1
+            continue  # 跳过，不入库
+
+        # 通过两层去重，封装为Document
         doc = Document(
             page_content=chunk,
-            metadata={"source": source_name, "md5_hash": chunk_hash},
+            metadata={
+                "source": source_name,
+                "md5_hash": chunk_hash,  # 存入MD5供后续查重
+            },
         )
-        valid_docs.append(doc)
-    # 批量写入,将最终的有效切片列表封装成Document对象:
-    if valid_docs:
-        vector_store.add_documents(valid_docs)
-        print(f"[入库成功]原文本切片{len(text_chunks)}")
-        print(f"MD5去重文本{md5_count}个,语义去重文本{semantic_count}个")
-        print(f"实际入库切片{len(valid_docs)}个")
-    else:
-        print(f"[入库提示]所有切片都被去重,无需入库")
+        doc_list.append(doc)
 
-    return len(valid_docs)  # 返回实际切片数量
+    # 3. 向量入库
+    if doc_list:
+        vector_store.add_documents(doc_list)
+
+    # 打印去重统计（面试时可以说清楚优化效果）
+    logger.info("[RAG入库] 总切片:%d, MD5去重:%d, 语义去重:%d, 实际入库:%d",
+                len(text_chunks), md5_dedup_count, semantic_dedup_count, len(doc_list))
+    return len(doc_list)
 
 
-# 设置向量数据库的检索参数
+# ==================== 检索服务（含相关度过滤+重排）====================
+
 def search_vector_store(vector_store: Chroma, query: str):
-    # k表示返回的文档数量,相似度检索的方法是余弦相似度
-    # 检索优化:扩大召回->过滤噪声->截取Top-K
-    # 1.扩大检索返回:
-    search_k = max(retrieve_top_k * 3, RERANK_TOP_K)  # 取最大值,确保检索到足够的文档
+    """
+    增强检索：扩大召回 → 相关度过滤 → 取top-K
+
+    第三层：用 similarity_search_with_score 获取带分数的结果，过滤低分噪声
+    第四层：先检索更多候选（RERANK_TOP_K），过滤后只取 retrieve_top_k 条
+
+    与原版区别：
+    - 原版直接 similarity_search(query, k=3)，无法过滤不相关结果
+    - 增强版先检索 top-20，过滤掉低于阈值的结果，再取 top-3
+    - 召回率高（不会漏掉相关内容），精度也高（噪声被过滤）
+
+    :param vector_store: 向量库
+    :param query: 查询文本
+    :return: 过滤后的Document列表
+    """
+    # 扩大检索范围，给过滤留余量
+    search_k = max(retrieve_top_k * 3, RERANK_TOP_K)
+
     try:
-        # 获取带分数的搜索结果:[(Document对象_1, 0.35), (Document对象_2, 0.42), ...]
         results = vector_store.similarity_search_with_score(query, k=search_k)
     except Exception as e:
-        print(f"[检索错误]{e}")
+        logger.error("[RAG检索] 向量检索失败: %s", e)
         return []
 
-    filtered_docs = []  # 过滤后的文档列表
+    if not results:
+        return []
 
-    # 2.相关度过滤:剔除低分噪声
+    # 第三层：相关度过滤
+    # 【关键修复】ChromaDB 使用 cosine 距离，cosine_similarity = 1 - score
+    # 低于阈值的不送入LLM（避免噪声干扰）
+    filtered_docs = []
     for doc, score in results:
-        # 【关键修复】ChromaDB返回平方L2距离，余弦相似度 = 1 - score/2
-        cosine_sim = max(0.0, 1 - score / 2)
-        if cosine_sim > SIMILARITY_THRESHOLD:
+        cosine_sim = max(0.0, 1 - score)
+        # 打印每条结果的分数，方便排查阈值问题
+        logger.info("[RAG检索] score=%.4f, 余弦相似度=%.4f, 内容: %s",
+                    score, cosine_sim, doc.page_content[:30])
+        if cosine_sim >= SIMILARITY_THRESHOLD:
             filtered_docs.append(doc)
 
-    # 3.截断重排:只保留Top-K个文档
-    # 如果过滤后文档数量不足Top-K,为了保证有内容返回,可以放宽策略,这里简单处理为直接截取
-    final_docs = filtered_docs[:retrieve_top_k]
-    print(f"[检索成功]共检索到{len(results)}个文档,过滤后{len(filtered_docs)}个,截取Top-{retrieve_top_k}个")
-    return final_docs
+    # 第四层：截断取top-K
+    # 如果过滤后结果不足retrieve_top_k，放宽阈值取top-K（保证LLM至少有上下文）
+    if len(filtered_docs) < retrieve_top_k:
+        print(f"[RAG检索] 过滤后仅{len(filtered_docs)}条，放宽阈值取top-{retrieve_top_k}")
+        filtered_docs = [doc for doc, _ in results[:retrieve_top_k]]
+    else:
+        filtered_docs = filtered_docs[:retrieve_top_k]
+    # 打印过滤后结果（面试时可以说清楚优化效果）
+    logger.info("[RAG检索] 候选%d条, 过滤后%d条", len(results), len(filtered_docs))
+    return filtered_docs
 
 
-# 将返回的文档列表,转换为字符串
+#将返回的文档列表,转换为字符串（含截断）
 def get_context_from_docs(docs: list[Document]) -> str:
     """
     将检索到的Document列表拼接成一段上下文文本字符串
+    【Token优化】超过 MAX_CONTEXT_CHARS 时截断，防止上下文过长浪费token
+
     :param docs: 检索到的Document列表
     :return: 上下文文本字符串
     """
-    # join是啥? 将列表中的元素用指定的分隔符拼接成一个字符串
-    # 这里用\n\n表示每个文档之间用两个换行符隔开
-    return "\n\n".join([doc.page_content for doc in docs])
+    #join是啥? 将列表中的元素用指定的分隔符拼接成一个字符串
+    #这里用\n\n表示每个文档之间用两个换行符隔开
+    context = "\n\n".join([doc.page_content for doc in docs])
+
+    # 超长截断：超过最大字符数时裁剪，末尾加省略标记
+    if len(context) > MAX_CONTEXT_CHARS:
+        context = context[:MAX_CONTEXT_CHARS] + "…(已截断)"
+        logger.info("[RAG上下文] 原始%d字, 截断至%d字", len(''.join([doc.page_content for doc in docs])), MAX_CONTEXT_CHARS)
+    return context
