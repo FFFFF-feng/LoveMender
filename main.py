@@ -1,4 +1,4 @@
-# streamlit 主入口,网页应用入口
+﻿# streamlit 主入口,网页应用入口
 import streamlit as st
 import tempfile  # 用于创建临时文件,用于存储用户上传的文件
 import os
@@ -44,6 +44,22 @@ def _get_summary_llm(api_key):
 def _get_vector_store(api_key):
     emb = _get_embedding(api_key)
     return init_vector_store(emb)
+
+# ========== API Key 自动获取 ==========
+def _get_api_key():
+    """优先从 Streamlit Secrets / .env 读取 API Key，找不到则返回空字符串"""
+    # 1. Streamlit Secrets（部署在 Streamlit Cloud 时）
+    try:
+        if "DASHSCOPE_API_KEY" in st.secrets:
+            return st.secrets["DASHSCOPE_API_KEY"]
+    except Exception:
+        pass
+    # 2. 环境变量（本地 .env 文件，config.py 中 load_dotenv 已加载）
+    key = os.environ.get("DASHSCOPE_API_KEY", "")
+    if key.strip():
+        return key
+    # 3. 都没有，返回空（后面用侧边栏输入兜底）
+    return ""
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -161,16 +177,22 @@ if "memory_manager" not in st.session_state:
 
 # ========== 侧边栏 ==========
 with st.sidebar:
-    st.header("🗝️ API 配置")
-    if "api_key_input" not in st.session_state:
-        st.session_state.api_key_input = ""
-    api_key = st.text_input(
-        "请输入阿里云API密钥",
-        type="password",
-        value=st.session_state.api_key_input,
-        help="阿里云平台申请的API密钥,用于调用通义千问模型",
-    )
-    st.session_state.api_key_input = api_key
+    # 优先从 Secrets / .env 自动获取 API Key
+    _auto_key = _get_api_key()
+    if _auto_key:
+        api_key = _auto_key
+        st.success("✅ API 已自动配置，可直接开始对话")
+    else:
+        st.header("🗝️ API 配置")
+        if "api_key_input" not in st.session_state:
+            st.session_state.api_key_input = ""
+        api_key = st.text_input(
+            "请输入阿里云API密钥",
+            type="password",
+            value=st.session_state.api_key_input,
+            help="阿里云平台申请的API密钥,用于调用通义千问模型",
+        )
+        st.session_state.api_key_input = api_key
     st.divider()
 
     # RAG 知识库上传
@@ -214,9 +236,10 @@ with st.sidebar:
             st.session_state.chat_history = []
             st.rerun()
 
+    _tip_step1 = "1.直接输入文字或上传截图开始" if _auto_key else "1.先填写API密钥"
     st.info(
         "💡 使用提示:\n"
-        "1.先填写API密钥\n"
+        f"{_tip_step1}\n"
         "2.上传情感知识库(可选)\n"
         "3.纯文本走Agent:自动调用\n"
         "  情绪分析/知识检索/修复建议\n"

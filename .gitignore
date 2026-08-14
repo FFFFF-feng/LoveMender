@@ -1,4 +1,4 @@
-# ===== 敏感信息(绝不提交) =====
+﻿# ===== 敏感信息(绝不提交) =====
 .env
 .env.local
 .env.*
@@ -25,3 +25,5 @@ logs/
 # ===== 系统文件 =====
 .DS_Store
 Thumbs.db
+# ===== Streamlit Secrets (绝不提交) =====
+.streamlit/secrets.toml
