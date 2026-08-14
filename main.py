@@ -8,23 +8,44 @@ from langchain_core.messages import HumanMessage  # 用于创建用户消息
 
 # 导入自定义模块
 from utils import base64_encode_image
-from model_factory import create_llm, create_text_llm, create_embedding
+from model_factory import create_llm, create_text_llm, create_summary_llm, create_embedding
 from rag_service import init_vector_store, ingest_txt_vector_store, search_vector_store, get_context_from_docs
 from prompt_template import role_prompt_dict
 from memory_manager import MemoryManager
 from logger import logger
 from agent_tools import (
     analyze_emotion,
-    get_repair_suggestion,
+    get_repair_suggestions,
     get_current_time,
-    create_agent_executor,
     create_knowledge_search_tool,
+    create_agent_executor,
     TOOL_INSTRUCTIONS,
 )
-# 从配置文件中获取最大迭代次数
 from config import AGENT_MAX_ITERATIONS
 
-## ========== 页面配置 ==========
+# ========== 缓存模型实例（避免每次点击按钮都重新创建）==========
+@st.cache_resource
+def _get_embedding(api_key):
+    return create_embedding(api_key)
+
+@st.cache_resource
+def _get_llm(api_key):
+    return create_llm(api_key)
+
+@st.cache_resource
+def _get_text_llm(api_key):
+    return create_text_llm(api_key)
+
+@st.cache_resource
+def _get_summary_llm(api_key):
+    return create_summary_llm(api_key)
+
+@st.cache_resource
+def _get_vector_store(api_key):
+    emb = _get_embedding(api_key)
+    return init_vector_store(emb)
+
+# ========== 页面配置 ==========
 st.set_page_config(
     page_title="情绪修复助手",
     page_icon="💔❤️",
@@ -158,8 +179,7 @@ with st.sidebar:
     if uploader_txt and api_key.strip():
         if st.session_state.get("uploaded_txt_name") != uploader_txt.name:
             txt_content = uploader_txt.read().decode("utf-8")
-            emb = create_embedding(api_key)
-            vec_store = init_vector_store(emb)
+            vec_store = _get_vector_store(api_key)
             chunk_count = ingest_txt_vector_store(txt_content, uploader_txt.name, vec_store)
             st.session_state.uploaded_txt_name = uploader_txt.name
             st.success(f"成功导入{chunk_count}条文本片段存入向量数据库")
@@ -198,18 +218,20 @@ with st.sidebar:
         "💡 使用提示:\n"
         "1.先填写API密钥\n"
         "2.上传情感知识库(可选)\n"
-        "3.对话自动保留多轮记忆\n"
-        "4.纯文本自动用qwen-plus省token\n"
+        "3.纯文本走Agent:自动调用\n"
+        "  情绪分析/知识检索/修复建议\n"
+        "4.图片走qwen-vl-max直接对话\n"
         "5.会话达上限时点击「新建会话」\n"
-        "  长期记忆会保留，不影响跨会话回忆"
+        "  长期记忆保留，不影响跨会话回忆"
     )
 
 # ========== 初始化记忆管理器 ==========
 if api_key.strip() and st.session_state.memory_manager is None:
     try:
-        llm_text = create_text_llm(api_key)
-        emb = create_embedding(api_key)
-        st.session_state.memory_manager = MemoryManager(llm_text, emb)
+        # 【Token优化】摘要压缩用 qwen-turbo（最便宜），不需要强模型
+        llm_summary = _get_summary_llm(api_key)
+        emb = _get_embedding(api_key)
+        st.session_state.memory_manager = MemoryManager(llm_summary, emb)
     except Exception as e:
         st.error(f"记忆系统初始化失败: {e}")
 
@@ -253,6 +275,9 @@ if send_btn:
         st.stop()
 
     memory_mgr = st.session_state.memory_manager
+    if memory_mgr is None:
+        st.error("记忆系统未初始化，请检查API密钥是否正确")
+        st.stop()
 
     # --- 展示用户消息 ---
     with st.chat_message("user"):
@@ -267,42 +292,42 @@ if send_btn:
         "content": user_text if user_text.strip() else "(图片消息)",
         "image": upload_img.getvalue() if upload_img else None,
     })
-    #初始化向量库:
-    emb=create_embedding(api_key)
-    vec_store=init_vector_store(emb)
-    # ========== 两条路径：图片走大模型，纯文本走Agent ==========
-    temp_path = None
-    ai_reply = None
+
+    # --- 初始化向量库 ---
+    vec_store = _get_vector_store(api_key)
+
+    # ===== 两条路径：图片走直接调用，纯文本走 Agent =====
+    temp_path = None  # 临时图片路径，finally 中统一清理
+    ai_reply = None   # 最终回复内容
 
     if upload_img:
-        # ===== 图片路径：qwen-vl-max 多模态直接调用 =====
-        llm = create_llm(api_key)
+        # ===== 图片路径：直接用 qwen-vl-max，不走 Agent =====
+        llm = _get_llm(api_key)
 
-        # RAG 预检索
+        # RAG 预检索（图片路径仍用预检索，Agent 不支持多模态工具调用）
         if user_text.strip():
             search_docs = search_vector_store(vec_store, user_text)
             context_text = get_context_from_docs(search_docs)
         else:
             context_text = ""
 
-        # 检索长期记忆
         long_term_context = memory_mgr.retrieve_relevant_memory(
             user_text if user_text.strip() else "图片对话"
         )
 
-        # 组装系统提示词
         full_context = ""
         if context_text:
             full_context += f"【知识库参考】\n{context_text}\n\n"
         if long_term_context:
             full_context += f"【历史对话摘要】\n{long_term_context}\n\n"
+
         raw_sys_prompt = role_prompt_dict[role_select]
         sys_prompt = raw_sys_prompt.format(context=full_context)
 
-        est_token = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
-        logger.info(f"[Token估算] 模型={llm.model_name}, 预估token数={est_token}")
+        est_tokens = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
+        logger.info("[Token估算] 模型=qwen-vl-max, 系统提示=%d字, 用户输入=%d字, 估算≈%dtoken",
+                     len(sys_prompt), len(user_text), est_tokens)
 
-        # 构建消息列表
         messages = memory_mgr.build_messages(sys_prompt, user_text)
 
         # 处理图片
@@ -322,24 +347,28 @@ if send_btn:
         ]
         messages[-1] = HumanMessage(content=human_content)
 
-        # 调用模型
         try:
-            with st.spinner("AI正在思考中..."):
-                response = llm.invoke(messages)
-                ai_reply = response.content
+            with st.chat_message("assistant"):
+                def _stream_image():
+                    for chunk in llm.stream(messages):
+                        if chunk.content:
+                            yield chunk.content
+                ai_reply = st.write_stream(_stream_image())
+            if ai_reply:
+                logger.info("[LLM] 图片对话完成，回复长度=%d字", len(ai_reply))
         except Exception as e:
-            logger.error(f"图片对话请求异常：{e}")
+            logger.error("[LLM] 图片对话请求异常: %s", e)
             st.error(f"请求异常：{e}")
 
     else:
-        # ===== 纯文本路径：qwen-plus + Agent 工具调用 =====
-        llm = create_text_llm(api_key)
+        # ===== 纯文本路径：Agent + 工具调用（Function Calling + ReAct）=====
+        llm = _get_text_llm(api_key)  # qwen-plus（支持 function calling）
 
-        # 检索长期记忆
+        # 检索长期记忆（注入系统提示词，不走工具）
         long_term_context = memory_mgr.retrieve_relevant_memory(user_text)
 
-        # 组装系统提示词
-        full_context = long_term_context if long_term_context else "(暂无历史对话)"
+        # 组装系统提示词 = 角色人设 + 历史记忆 + 工具使用指令
+        full_context = long_term_context if long_term_context else "（暂无历史摘要）"
         raw_sys_prompt = role_prompt_dict[role_select]
         sys_prompt = raw_sys_prompt.format(context=full_context)
         sys_prompt += "\n\n" + TOOL_INSTRUCTIONS
@@ -347,47 +376,66 @@ if send_btn:
         # 构建工具列表
         tools = [
             analyze_emotion,
-            get_repair_suggestion,
+            get_repair_suggestions,
             get_current_time,
             create_knowledge_search_tool(vec_store),
         ]
 
-        # 获取聊天历史
+        # 获取聊天历史（供 Agent 理解上下文）
         chat_history = memory_mgr.get_chat_history_messages()
 
-        est_token = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
-        logger.info(f"[Token估算] 模型={llm.model_name}, 预估token数={est_token}")
+        est_tokens = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
+        logger.info("[Token估算] 模型=qwen-plus(Agent), 系统提示=%d字, 用户输入=%d字, 估算≈%dtoken",
+                     len(sys_prompt), len(user_text), est_tokens)
 
-        # 创建并执行 Agent
+        # 创建并执行 Agent（langchain 1.x create_agent API，流式输出）
         try:
-            with st.spinner("Agent正在分析并调用工具..."):
-                agent_message = chat_history + [HumanMessage(content=user_text)]
-                executor = create_agent_executor(llm, tools, sys_prompt, max_iterations=AGENT_MAX_ITERATIONS)
-                result = executor.invoke({"messages": agent_message})
-                ai_reply = result["messages"][-1].content
-                logger.info(f"[Agent回复] 执行完毕,回复长度={len(ai_reply)}")
+            agent_messages = chat_history + [HumanMessage(content=user_text)]
+            executor = create_agent_executor(llm, tools, sys_prompt, max_iterations=AGENT_MAX_ITERATIONS)
+
+            with st.chat_message("assistant"):
+                response_placeholder = st.empty()
+                full_text = ""
+                for chunk, meta in executor.stream(
+                    {"messages": agent_messages},
+                    config={"recursion_limit": getattr(executor, "_recursion_limit", 25)},
+                    stream_mode="messages",
+                ):
+                    if hasattr(chunk, "content") and chunk.content and not hasattr(chunk, "tool_call_id"):
+                        full_text += chunk.content
+                        response_placeholder.markdown(full_text)
+                ai_reply = full_text if full_text else None
+
+            if ai_reply:
+                logger.info("[Agent] 执行完成，回复长度=%d字", len(ai_reply))
+            else:
+                raise Exception("Agent未返回内容")
         except Exception as e:
-            logger.error(f"[Agent] 执行失败,回退到直接调用大模型：{e}")
+            logger.error("[Agent] 执行失败，回退到直接调用: %s", e)
+            # 降级：直接用 LLM 调用（不用工具），同样流式输出
             try:
                 messages = memory_mgr.build_messages(sys_prompt, user_text)
-                response = llm.invoke(messages)
-                ai_reply = response.content
-                logger.info(f"[Agent降级] 直接调用大模型成功")
+                with st.chat_message("assistant"):
+                    def _stream_fallback():
+                        for chunk in llm.stream(messages):
+                            if chunk.content:
+                                yield chunk.content
+                    ai_reply = st.write_stream(_stream_fallback())
+                logger.info("[Agent降级] 直接调用成功")
             except Exception as e2:
-                logger.error(f"[Agent降级] 直接调用大模型失败：{e2}")
+                logger.error("[Agent降级] 直接调用也失败: %s", e2)
                 st.error(f"请求异常：{e2}")
 
-    # ========== 公共：展示回复 + 存入记忆 + 清理 ==========
+    # ===== 共通：存入记忆（展示已在上方流式输出中完成）=====
     if ai_reply:
-        with st.chat_message("assistant"):
-            st.markdown(ai_reply)
         st.session_state.chat_history.append({
             "role": "assistant",
             "content": ai_reply,
             "image": None,
         })
+
         memory_mgr.add_exchange(
-            user_text if user_text.strip() else "图片对话",
+            user_text if user_text.strip() else "(图片消息)",
             ai_reply,
         )
 
