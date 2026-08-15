@@ -148,9 +148,14 @@ def ingest_txt_vector_store(raw_text: str, source_name: str, vector_store):
         )
         doc_list.append(doc)
 
-    # 3. 向量入库
+    # 3. 向量入库（DashScope API限制：每次最多25条，需分批入库）
     if doc_list:
-        vector_store.add_documents(doc_list)
+        BATCH_SIZE = 25
+        for i in range(0, len(doc_list), BATCH_SIZE):
+            batch = doc_list[i:i + BATCH_SIZE]
+            vector_store.add_documents(batch)
+            logger.debug("[RAG入库] 批次 %d/%d 入库 %d 条", i // BATCH_SIZE + 1,
+                         (len(doc_list) + BATCH_SIZE - 1) // BATCH_SIZE, len(batch))
 
     # 打印去重统计（面试时可以说清楚优化效果）
     logger.info("[RAG入库] 总切片:%d, MD5去重:%d, 语义去重:%d, 实际入库:%d",

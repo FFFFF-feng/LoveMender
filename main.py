@@ -353,16 +353,22 @@ if send_btn:
 
         messages = memory_mgr.build_messages(sys_prompt, user_text)
 
-        # 处理图片
-        file_ext = os.path.splitext(upload_img.name)[1] or ".jpg"
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
-        temp_file.write(upload_img.read())
-        temp_file.close()
-        temp_path = Path(temp_file.name)
-        b64_img = base64_encode_image(str(temp_path))
+        # 处理图片（压缩后再发给API，避免DashScope文件大小限制）
+        from PIL import Image
+        import io
 
-        mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
-        mime_type = mime_map.get(file_ext.lower(), "image/jpeg")
+        img = Image.open(upload_img)
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+        max_dim = 1024
+        if max(img.size) > max_dim:
+            ratio = max_dim / max(img.size)
+            img = img.resize((int(img.size[0] * ratio), int(img.size[1] * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        b64_img = base64.b64encode(buf.getvalue()).decode()
+        mime_type = "image/jpeg"
+        logger.info("[图片处理] 压缩后尺寸=%dx%d, 大小≈%.0fKB", img.size[0], img.size[1], len(buf.getvalue()) / 1024)
 
         human_content = [
             {"type": "text", "text": user_text},
