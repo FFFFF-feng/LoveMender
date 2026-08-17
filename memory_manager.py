@@ -78,11 +78,11 @@ class MemoryManager:
             logger.error("[Memory] 压缩旧记忆时出错: %s", e)
             summary_text = "历史对话摘要生成失败"
 
-        # 将摘要作为系统消息插入到短期记忆的最开头
-        self.short_term_memory.insert(0, {"role": "system", "content": summary_text})
-
         # 删除最早的两轮对话（4条消息）
         del self.short_term_memory[:4]
+
+        # 将摘要作为系统消息插入到短期记忆的最开头
+        self.short_term_memory.insert(0, {"role": "system", "content": summary_text})
 
         # 将摘要存入长期记忆向量数据库
         if summary_text.strip():
