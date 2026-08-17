@@ -179,6 +179,26 @@ LoveMender/
 
 ---
 
+## 🐳 Docker 部署（推荐）
+
+一行命令启动，无需手动配置环境：
+
+\\ash
+# 1. 配置 API Key
+cp .env.example .env
+# 编辑 .env 填入你的 DASHSCOPE_API_KEY
+
+# 2. 构建并启动
+docker compose up -d
+
+# 3. 访问
+# 浏览器打开 http://localhost:8501
+
+# 4. 停止
+docker compose down
+\
+> 数据持久化：向量数据库和日志通过 volume 挂载，容器重启不丢数据。
+
 ## 快速开始
 
 ### 环境要求

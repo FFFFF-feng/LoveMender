@@ -1,0 +1,13 @@
+services:
+  lovemender:
+    build: .
+    container_name: lovemender
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./chroma_rag_db:/app/chroma_rag_db
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped

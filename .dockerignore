@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.env
+.env.*
+*.log
+logs/
+chroma_rag_db/
+docs/
+.idea/
+.vscode/
+*.md
+eval_*.py
