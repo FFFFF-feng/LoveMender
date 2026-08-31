@@ -20,8 +20,10 @@ from agent_tools import (
     create_knowledge_search_tool,
     create_agent_executor,
     TOOL_INSTRUCTIONS,
+    MCP_TOOL_GUIDANCE,
 )
 from config import AGENT_MAX_ITERATIONS
+from mcp_manager import get_mcp_tools
 
 # ========== 缓存模型实例（避免每次点击按钮都重新创建）==========
 @st.cache_resource
@@ -44,6 +46,24 @@ def _get_summary_llm(api_key):
 def _get_vector_store(api_key):
     emb = _get_embedding(api_key)
     return init_vector_store(emb)
+
+@st.cache_resource
+def _get_mcp_tools():
+    """
+    初始化 MCP 工具并缓存
+    注意：MCP 初始化是异步的，用 asyncio.run 在同步环境里跑
+    返回 LangChain 格式的工具列表（可能为空，取决于配置和 Token）
+    """
+    import asyncio
+    try:
+        # asyncio.run 会创建一个新的事件循环来跑异步函数
+        # 跑完后自动关闭循环，不会影响 Streamlit 的主线程
+        tools = asyncio.run(get_mcp_tools())
+        return tools
+    except Exception as e:
+        from logger import logger
+        logger.error("[MCP] 初始化失败: %s", e)
+        return []
 
 # ========== API Key 自动获取 ==========
 def _get_api_key():
@@ -209,6 +229,20 @@ with st.sidebar:
             st.info("该文件已导入知识库，无需重复上传")
     elif uploader_txt and not api_key.strip():
         st.warning("请先输入API密钥,再上传txt文件")
+
+    st.divider()
+
+    # ===== MCP 工具状态显示 =====
+    if api_key.strip():
+        mcp_tools = _get_mcp_tools()
+        if mcp_tools:
+            st.success(f"🛠️ GitHub 工具已加载 ({len(mcp_tools)}个)")
+        else:
+            github_token = os.environ.get("GITHUB_TOKEN", "")
+            if not github_token.strip():
+                st.info("💡 配置 GITHUB_TOKEN 后可启用 GitHub 开发工具")
+            else:
+                st.warning("⚠️ GitHub 工具加载失败，检查 Node.js 是否安装")
 
     st.divider()
 
@@ -402,13 +436,19 @@ if send_btn:
         sys_prompt = raw_sys_prompt.format(context=full_context)
         sys_prompt += "\n\n" + TOOL_INSTRUCTIONS
 
-        # 构建工具列表
+        # 获取 MCP 工具（如果有 GitHub Token 就会加载，没有则返回空列表，不影响原有功能）
+        mcp_tools = _get_mcp_tools()
+        if mcp_tools:
+            # 有 MCP 工具时，追加上 GitHub 工具的使用说明
+            sys_prompt += "\n\n" + MCP_TOOL_GUIDANCE
+
+        # 构建工具列表 = 内置工具 + MCP 工具
         tools = [
             analyze_emotion,
             get_repair_suggestions,
             get_current_time,
             create_knowledge_search_tool(vec_store),
-        ]
+        ] + mcp_tools
 
         # 获取聊天历史（供 Agent 理解上下文）
         chat_history = memory_mgr.get_chat_history_messages()
