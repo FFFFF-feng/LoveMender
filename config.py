@@ -17,11 +17,11 @@ chunk_overlap =int(os.environ.get("CHUNK_OVERLAP", 80))  # 文本切片的重叠
 # 向量检索返回topK片段数量
 retrieve_top_k = int(os.environ.get("RETRIEVE_TOP_K", 10))
 
-# ========== 三级模型路由 ==========
-# qwen-vl-max: 多模态(图片) → 最贵但最强
-# qwen-plus:  纯文本对话    → 中等性价比
-# qwen-turbo: 摘要/简单任务  → 最便宜，摘要够用
-SUMMARY_MODEL_NAME=os.environ.get("SUMMARY_MODEL_NAME", "qwen-turbo")#摘要压缩用的轻量模型
+# ========== 三级模型路由（新版 qwen3.x 系列）==========
+# 第一级 qwen3.7-plus:    多模态(图片)+复杂对话 → 最强，替代旧版 qwen-vl-max
+# 第二级 qwen3.8-27b:     纯文本对话            → 中等，替代旧版 qwen-plus
+# 第三级 qwen3.7-flash:   摘要/简单任务          → 最轻最快，替代旧版 qwen-turbo
+SUMMARY_MODEL_NAME=os.environ.get("SUMMARY_MODEL_NAME", "qwen3.7-flash")#摘要压缩用的轻量模型
 
 # 通义千问兼容OpenAI的接口地址
 # LangChain默认会访问OpenAI官方地址，需要手动指定base_url转发到阿里云通义千问网关
@@ -29,9 +29,9 @@ DASHSCOPE_BASE_URL =os.environ.get(
     "DASHSCOPE_BASE_URL",
     "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
-# 模型名称
-model_name=os.environ.get("MODEL_NAME", "qwen-vl-max")
-TEXT_MODEL_NAME = os.environ.get("TEXT_MODEL_NAME", "qwen-plus")  # 【新增】纯文本模型（无图片时用，省token）
+# 模型名称（新版 qwen3.x 系列，有免费额度）
+model_name=os.environ.get("MODEL_NAME", "qwen3.7-plus")  # 第一级：多模态+复杂对话
+TEXT_MODEL_NAME = os.environ.get("TEXT_MODEL_NAME", "qwen3.8-27b")  # 第二级：纯文本对话（省token）
 embedding_model_name = os.environ.get("EMBEDDING_MODEL_NAME", "text-embedding-v1") # 文本转向量模型
 
 # 请求超时时间设置
