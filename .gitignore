@@ -49,5 +49,3 @@ test_wechat_ui.py
 _debug_*.py
 _probe_*.py
 _test_*.py
-eval_rag.py
-eval_system.py
