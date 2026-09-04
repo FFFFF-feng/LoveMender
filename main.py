@@ -24,6 +24,15 @@ from agent_tools import (
 )
 from config import AGENT_MAX_ITERATIONS
 from mcp_manager import get_mcp_tools
+from persona import (
+    ManualImporter,
+    WeChatImporter,
+    WeChatDBImporter,
+    PersonaExtractor,
+    PersonaManager,
+    PersonaPromptGenerator,
+    ExtractionDimension,
+)
 
 # ========== 缓存模型实例（避免每次点击按钮都重新创建）==========
 @st.cache_resource
@@ -194,6 +203,14 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []  # UI 展示用
 if "memory_manager" not in st.session_state:
     st.session_state.memory_manager = None  # AI 用的记忆管理器
+if "persona_enabled" not in st.session_state:
+    st.session_state.persona_enabled = False  # 人格化开关
+if "persona_slug" not in st.session_state:
+    st.session_state.persona_slug = ""  # 当前使用的画像标识
+if "persona_manager" not in st.session_state:
+    st.session_state.persona_manager = None  # 画像管理器实例
+if "persona_generator" not in st.session_state:
+    st.session_state.persona_generator = None  # 提示词生成器实例
 
 # ========== 侧边栏 ==========
 with st.sidebar:
@@ -246,6 +263,234 @@ with st.sidebar:
 
     st.divider()
 
+    # ===== 人格画像管理 =====
+    st.subheader("🎭 人格画像（对方性格克隆）")
+
+    # 初始化画像管理器
+    if api_key.strip() and st.session_state.persona_manager is None:
+        st.session_state.persona_manager = PersonaManager(root_dir="persona_data")
+
+    persona_mgr = st.session_state.persona_manager
+
+    if persona_mgr:
+        # 列出已有画像
+        existing_personas = persona_mgr.list_personas()
+
+        if existing_personas:
+            selected = st.selectbox(
+                "选择对方画像",
+                options=["（不使用）"] + existing_personas,
+                index=0 if not st.session_state.persona_enabled else (
+                    existing_personas.index(st.session_state.persona_slug) + 1
+                    if st.session_state.persona_slug in existing_personas else 0
+                ),
+            )
+            if selected == "（不使用）":
+                if st.session_state.persona_enabled:
+                    st.session_state.persona_enabled = False
+                    st.session_state.persona_slug = ""
+                    st.session_state.persona_generator = None
+            else:
+                if not st.session_state.persona_enabled or st.session_state.persona_slug != selected:
+                    st.session_state.persona_enabled = True
+                    st.session_state.persona_slug = selected
+                    st.session_state.persona_generator = PersonaPromptGenerator(
+                        selected, persona_mgr
+                    )
+                # 显示画像信息
+                manifest = persona_mgr.load_persona(selected)
+                if manifest:
+                    st.info(
+                        f"👤 {manifest.name} · "
+                        f"{manifest.total_messages}条消息 · "
+                        f"{len(manifest.dimensions)}个维度"
+                    )
+        else:
+            st.info("暂无画像，上传聊天记录生成一个吧")
+
+        st.divider()
+
+        # 生成新画像（参考 LangChain/immortal-skill/WeClone 方案）
+        st.markdown("**生成新画像**")
+        import_tab = st.radio(
+            "导入方式",
+            ["上传文件(CSV/JSON/TXT)", "粘贴聊天记录"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+        # 共用的画像生成函数
+        def _generate_persona(importer, raw_data, target_name, source_label):
+            """通用画像生成流程：解析→清洗→提取→保存"""
+            import re as _re
+            with st.spinner("正在分析聊天记录...这可能需要 1-3 分钟"):
+                # Step 1: 解析+清洗
+                if isinstance(raw_data, str) and raw_data.startswith("__file__:"):
+                    file_path = Path(raw_data[7:])
+                    messages = importer.parse_file(file_path)
+                else:
+                    messages = importer.parse(raw_data)
+
+                clean_msgs = importer.clean(messages)
+                corpus_md = importer.to_corpus_markdown(
+                    clean_msgs, target_person=target_name
+                )
+                st.info(f"📝 解析完成：{len(clean_msgs)} 条消息")
+
+                if len(clean_msgs) < 5:
+                    st.warning("消息太少（不足5条），可能无法有效提取人格特征")
+                    return
+
+                # Step 2: 人格提取
+                extractor = PersonaExtractor(api_key)
+                results = extractor.extract_all(
+                    corpus_md, target_name=target_name
+                )
+                st.info("🧠 人格提取完成")
+
+                # Step 3: 生成 slug
+                slug_base = _re.sub(r'[^\w]', '', target_name)
+                if not slug_base:
+                    slug_base = "persona"
+                slug = slug_base
+                counter = 1
+                while slug in existing_personas:
+                    slug = f"{slug_base}_{counter}"
+                    counter += 1
+
+                # Step 4: 保存画像
+                manifest = persona_mgr.create_persona(
+                    slug=slug,
+                    name=target_name,
+                    results=results,
+                    sources=[source_label],
+                    platforms=["wechat"],
+                    persona_type="partner",
+                    total_messages=len(clean_msgs),
+                )
+
+                st.session_state.persona_enabled = True
+                st.session_state.persona_slug = slug
+                st.session_state.persona_generator = PersonaPromptGenerator(
+                    slug, persona_mgr
+                )
+
+                st.success(f"✅ 画像「{target_name}」生成完成！已自动启用")
+                logger.info("[人格画像] 生成完成：%s (%d条消息)", slug, len(clean_msgs))
+
+        if import_tab == "上传文件(CSV/JSON/TXT)":
+            new_persona_name = st.text_input(
+                "对方昵称/称呼",
+                value=st.session_state.get("new_persona_name", ""),
+                placeholder="如：小美、宝宝",
+                help="用于画像命名和提示词中指代对方",
+            )
+            st.session_state.new_persona_name = new_persona_name
+
+            chat_upload = st.file_uploader(
+                "上传聊天记录文件",
+                type=["csv", "json", "txt"],
+                help=(
+                    "支持 WeChatMsg/PyWxDump/chatlog-keeper 等工具导出的文件\n"
+                    "CSV: 发送者,内容,时间 或 PyWxDump 格式\n"
+                    "JSON: 消息数组格式\n"
+                    "TXT: 微信复制格式或 immortal-skill 格式"
+                ),
+            )
+
+            if chat_upload and new_persona_name.strip() and api_key.strip():
+                if st.button(
+                    "✨ 生成对方人格画像",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=st.session_state.get("persona_generating", False),
+                ):
+                    st.session_state.persona_generating = True
+                    try:
+                        # 保存上传文件到临时路径，再用 WeChatImporter 解析
+                        tmp_dir = Path(tempfile.mkdtemp())
+                        tmp_path = tmp_dir / chat_upload.name
+                        tmp_path.write_bytes(chat_upload.getvalue())
+
+                        importer = WeChatImporter()
+                        _generate_persona(
+                            importer,
+                            f"__file__:{tmp_path}",
+                            new_persona_name.strip(),
+                            chat_upload.name,
+                        )
+                    except Exception as e:
+                        logger.error("[人格画像] 生成失败：%s", e, exc_info=True)
+                        st.error(f"生成失败：{e}")
+                    finally:
+                        st.session_state.persona_generating = False
+                        st.rerun()
+
+            elif chat_upload and not new_persona_name.strip():
+                st.warning("请先填写对方昵称")
+            elif chat_upload and not api_key.strip():
+                st.warning("请先配置 API Key")
+
+        else:  # 粘贴聊天记录
+            st.caption(
+                "💡 操作方法：在微信中选中消息 → Ctrl+C 复制 → 粘贴到下方文本框\n"
+                "参考 LangChain WeChatChatLoader 方案，支持微信复制格式"
+            )
+
+            new_persona_name = st.text_input(
+                "对方昵称/称呼",
+                value=st.session_state.get("new_persona_name_paste", ""),
+                placeholder="如：小美、宝宝",
+                key="persona_name_paste",
+            )
+            st.session_state.new_persona_name_paste = new_persona_name
+
+            pasted_text = st.text_area(
+                "粘贴聊天记录",
+                height=250,
+                placeholder=(
+                    "在此粘贴从微信复制的聊天记录...\n\n"
+                    "示例格式：\n"
+                    "张三 2025/1/15 14:30\n\n"
+                    "你好啊\n\n"
+                    "李四 2025/1/15 14:31\n\n"
+                    "最近怎么样"
+                ),
+            )
+
+            if pasted_text.strip() and new_persona_name.strip() and api_key.strip():
+                if st.button(
+                    "✨ 生成对方人格画像",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=st.session_state.get("persona_generating", False),
+                ):
+                    st.session_state.persona_generating = True
+                    try:
+                        importer = WeChatImporter()
+                        _generate_persona(
+                            importer,
+                            pasted_text.strip(),
+                            new_persona_name.strip(),
+                            "微信粘贴导入",
+                        )
+                    except Exception as e:
+                        logger.error("[人格画像] 生成失败：%s", e, exc_info=True)
+                        st.error(f"生成失败：{e}")
+                    finally:
+                        st.session_state.persona_generating = False
+                        st.rerun()
+
+            elif pasted_text.strip() and not new_persona_name.strip():
+                st.warning("请先填写对方昵称")
+            elif pasted_text.strip() and not api_key.strip():
+                st.warning("请先配置 API Key")
+
+    else:
+        st.info("💡 配置 API Key 后可使用人格画像功能")
+
+    st.divider()
+
     # ===== 会话状态监控 + 新建会话 =====
     if st.session_state.memory_manager:
         stats = st.session_state.memory_manager.get_session_stats()
@@ -291,6 +536,39 @@ if api_key.strip() and st.session_state.memory_manager is None:
         st.session_state.memory_manager = MemoryManager(llm_summary, emb)
     except Exception as e:
         st.error(f"记忆系统初始化失败: {e}")
+
+
+# ========== 人格化提示词辅助 ==========
+def _build_persona_addon(user_text: str = "") -> str:
+    """如果开启了人格画像，生成人格化提示词附加段
+
+    返回可直接拼接到系统提示词后的字符串，未开启则返回空。
+    """
+    if not st.session_state.persona_enabled or not st.session_state.persona_generator:
+        return ""
+
+    # 简单情绪判断（关键词匹配，避免额外调用 LLM）
+    emotion = "neutral"
+    angry_kw = ["生气", "吵架", "骂", "冷暴力", "不理", "道歉", "认错", "矛盾", "不满", "气", "火"]
+    sad_kw = ["难过", "委屈", "哭", "伤心", "不开心", "失落", "难受"]
+    happy_kw = ["开心", "高兴", "快乐", "幸福", "甜", "想你", "爱"]
+    anxious_kw = ["担心", "害怕", "不安", "焦虑", "紧张", "压力", "怕"]
+
+    text_lower = user_text
+    if any(kw in text_lower for kw in angry_kw):
+        emotion = "angry"
+    elif any(kw in text_lower for kw in sad_kw):
+        emotion = "sad"
+    elif any(kw in text_lower for kw in happy_kw):
+        emotion = "happy"
+    elif any(kw in text_lower for kw in anxious_kw):
+        emotion = "anxious"
+
+    persona_prompt = st.session_state.persona_generator.generate(
+        user_message=user_text,
+        emotion=emotion,
+    )
+    return persona_prompt.to_system_prompt_addon()
 
 # ========== 主界面 ==========
 st.markdown('<div class="main-title">💢❤️💢 情绪修复助手</div>', unsafe_allow_html=True)
@@ -381,6 +659,11 @@ if send_btn:
         raw_sys_prompt = role_prompt_dict[role_select]
         sys_prompt = raw_sys_prompt.format(context=full_context)
 
+        # 注入人格化提示词（如果开启了画像）
+        persona_addon = _build_persona_addon(user_text)
+        if persona_addon:
+            sys_prompt += "\n\n" + persona_addon
+
         est_tokens = int(len(sys_prompt) * 1.5 + len(user_text) * 1.5)
         logger.info("[Token估算] 模型=qwen-vl-max, 系统提示=%d字, 用户输入=%d字, 估算≈%dtoken",
                      len(sys_prompt), len(user_text), est_tokens)
@@ -430,10 +713,16 @@ if send_btn:
         # 检索长期记忆（注入系统提示词，不走工具）
         long_term_context = memory_mgr.retrieve_relevant_memory(user_text)
 
-        # 组装系统提示词 = 角色人设 + 历史记忆 + 工具使用指令
+        # 组装系统提示词 = 角色人设 + 人格画像 + 历史记忆 + 工具使用指令
         full_context = long_term_context if long_term_context else "（暂无历史摘要）"
         raw_sys_prompt = role_prompt_dict[role_select]
         sys_prompt = raw_sys_prompt.format(context=full_context)
+
+        # 注入人格化提示词（如果开启了画像）
+        persona_addon = _build_persona_addon(user_text)
+        if persona_addon:
+            sys_prompt += "\n\n" + persona_addon
+
         sys_prompt += "\n\n" + TOOL_INSTRUCTIONS
 
         # 获取 MCP 工具（如果有 GitHub Token 就会加载，没有则返回空列表，不影响原有功能）

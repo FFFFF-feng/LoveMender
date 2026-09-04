@@ -20,6 +20,7 @@ def create_llm(api_key: str):
         timeout=request_timeout,
         temperature=temperature,
         max_tokens=MAX_REPLY_TOKENS,
+        extra_body={"enable_thinking": False},  # 禁用思考模式，避免 content 为空
     )
     return llm
 
@@ -33,6 +34,7 @@ def create_text_llm(api_key: str):
         timeout=request_timeout,
         temperature=temperature,
         max_tokens=MAX_REPLY_TOKENS,
+        extra_body={"enable_thinking": False},  # 禁用思考模式，避免 content 为空
     )
     return llm
 

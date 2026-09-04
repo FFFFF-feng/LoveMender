@@ -1,4 +1,4 @@
-﻿# ===== 敏感信息(绝不提交) =====
+# ===== 敏感信息(绝不提交) =====
 .env
 .env.local
 .env.*
@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+*.pyc
 
 # ===== 虚拟环境 =====
 .venv/
@@ -16,7 +17,10 @@ env/
 
 # ===== 运行时数据 =====
 chroma_rag_db/
+chroma_db/
 logs/
+persona_data/
+persona_output/
 
 # ===== IDE =====
 .idea/
@@ -25,5 +29,25 @@ logs/
 # ===== 系统文件 =====
 .DS_Store
 Thumbs.db
+
 # ===== Streamlit Secrets (绝不提交) =====
 .streamlit/secrets.toml
+
+# ===== 临时文件 =====
+temp/
+tmp/
+*.tmp
+temp_wechat_decrypt_readme.md
+test_wechat_importer.py
+test_corpus_cleaner.py
+test_persona_extractor.py
+test_persona_manager.py
+test_persona_prompt.py
+test_wechat_ui.py
+
+# ===== 调试脚本 =====
+_debug_*.py
+_probe_*.py
+_test_*.py
+eval_rag.py
+eval_system.py

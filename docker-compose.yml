@@ -6,6 +6,7 @@ services:
       - "8501:8501"
     volumes:
       - ./chroma_rag_db:/app/chroma_rag_db
+      - ./persona_data:/app/persona_data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
     environment:
